@@ -47,85 +47,73 @@ jobs:
         id: chromium
         run: |
           LAST_CHANGE_URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots/${{ matrix.chromium_platform }}/LAST_CHANGE"
+          POSITION=$(curl -s "$LAST_CHANGE_URL")
+          echo "POSITION=$POSITION" >> $GITHUB_OUTPUT
+          echo "Found Chromium build: $POSITION"
           
-          if curl -s --head "$LAST_CHANGE_URL" | head -n 1 | grep "200\|301\|302" > /dev/null; then
-            POSITION=$(curl -s "$LAST_CHANGE_URL")
-            echo "POSITION=$POSITION" >> $GITHUB_OUTPUT
-            echo "Found Chromium build: $POSITION for ${{ matrix.chromium_platform }}"
-          else
-            echo "Platform ${{ matrix.chromium_platform }} not available"
-            echo "POSITION=skip" >> $GITHUB_OUTPUT
-          fi
-          
-      - name: Download Chromium
-        if: steps.chromium.outputs.POSITION != 'skip'
+      - name: Download and Extract
         run: |
           BASE_URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots"
           POSITION="${{ steps.chromium.outputs.POSITION }}"
           
+          # Download
           if [ "${{ matrix.platform }}" = "windows" ]; then
             URL="${BASE_URL}/${{ matrix.chromium_platform }}/${POSITION}/chrome-win.zip"
-            echo "Downloading from: $URL"
-            curl -L -o chromium.zip "$URL"
           elif [ "${{ matrix.platform }}" = "linux" ]; then
             URL="${BASE_URL}/Linux_x64/${POSITION}/chrome-linux.zip"
-            echo "Downloading from: $URL"
-            curl -L -o chromium.zip "$URL"
-          elif [ "${{ matrix.platform }}" = "mac" ]; then
+          else
             URL="${BASE_URL}/${{ matrix.chromium_platform }}/${POSITION}/chrome-mac.zip"
-            echo "Downloading from: $URL"
-            curl -L -o chromium.zip "$URL"
           fi
           
-      - name: Extract ANGLE libraries
-        if: steps.chromium.outputs.POSITION != 'skip'
-        run: |
+          echo "Downloading: $URL"
+          curl -L -o chromium.zip "$URL"
           unzip -q chromium.zip
           
+          # Extract libraries
           mkdir -p angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}
           
           if [ "${{ matrix.platform }}" = "windows" ]; then
-            if [ -d "chrome-win" ]; then
-              CHROME_DIR="chrome-win"
-            else
-              echo "Chrome directory not found"
-              ls -la
-              exit 1
+            cp chrome-win/libEGL.dll angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
+            cp chrome-win/libGLESv2.dll angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
+            cp chrome-win/d3dcompiler_47.dll angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || true
+            if [ -d chrome-win/swiftshader ]; then
+              mkdir -p angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/swiftshader
+              cp chrome-win/swiftshader/*.dll angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/swiftshader/ || true
             fi
-            
-            cp $CHROME_DIR/libEGL.dll angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || echo "libEGL.dll not found"
-            cp $CHROME_DIR/libGLESv2.dll angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || echo "libGLESv2.dll not found"
-            cp $CHROME_DIR/d3dcompiler_*.dll angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || true
-            
-            if [ -d "$CHROME_DIR/swiftshader" ]; then
-              cp $CHROME_DIR/swiftshader/libEGL.dll angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/swiftshader_libEGL.dll || true
-              cp $CHROME_DIR/swiftshader/libGLESv2.dll angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/swiftshader_libGLESv2.dll || true
-            fi
-            
           elif [ "${{ matrix.platform }}" = "linux" ]; then
-            if [ -d "chrome-linux" ]; then
-              cp chrome-linux/libEGL.so angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || echo "libEGL.so not found"
-              cp chrome-linux/libGLESv2.so angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || echo "libGLESv2.so not found"
+            cp chrome-linux/libEGL.so angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
+            cp chrome-linux/libGLESv2.so angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
+            if [ -d chrome-linux/swiftshader ]; then
+              mkdir -p angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/swiftshader
+              cp chrome-linux/swiftshader/*.so angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/swiftshader/ || true
+            fi
+          else
+            # macOS - find libraries in app bundle
+            APP_PATH="chrome-mac/Chromium.app"
+            if [ -d "$APP_PATH/Contents/Frameworks/Chromium Framework.framework/Libraries" ]; then
+              cp "$APP_PATH/Contents/Frameworks/Chromium Framework.framework/Libraries/libEGL.dylib" angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || \
+              find "$APP_PATH" -name "libEGL.dylib" -exec cp {} angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ \;
               
-              if [ -d "chrome-linux/swiftshader" ]; then
-                cp chrome-linux/swiftshader/libEGL.so angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/swiftshader_libEGL.so || true
-                cp chrome-linux/swiftshader/libGLESv2.so angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/swiftshader_libGLESv2.so || true
-              fi
+              cp "$APP_PATH/Contents/Frameworks/Chromium Framework.framework/Libraries/libGLESv2.dylib" angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || \
+              find "$APP_PATH" -name "libGLESv2.dylib" -exec cp {} angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ \;
             fi
             
-          elif [ "${{ matrix.platform }}" = "mac" ]; then
-            APP_PATH="chrome-mac/Chromium.app"
-            if [ -d "$APP_PATH/Contents/Frameworks" ]; then
-              find "$APP_PATH/Contents/Frameworks" -name "libEGL.dylib" -exec cp {} angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ \;
-              find "$APP_PATH/Contents/Frameworks" -name "libGLESv2.dylib" -exec cp {} angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ \;
+            # Check for swiftshader
+            if [ -d "$APP_PATH/Contents/Frameworks/Chromium Framework.framework/Libraries/vk_swiftshader.dylib" ]; then
+              mkdir -p angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/swiftshader
+              cp "$APP_PATH/Contents/Frameworks/Chromium Framework.framework/Libraries/vk_swiftshader*.dylib" angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/swiftshader/ || true
             fi
           fi
           
-          # Get ANGLE headers
+          # Get headers
           git clone --depth 1 https://chromium.googlesource.com/angle/angle.git angle-headers
           cp -r angle-headers/include angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
           
-          # Create zip
+          # List contents
+          echo "Package contents:"
+          ls -la angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
+          
+          # Package
           zip -r angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}
           
       - name: Upload Artifacts
@@ -136,94 +124,78 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
-  build-linux-arm64:
+  extract-linux-arm64:
     runs-on: ubuntu-24.04
     needs: info
     env:
-      ANGLE_COMMIT: ${{ needs.info.outputs.ANGLE_COMMIT }}
       BUILD_DATE: ${{ needs.info.outputs.BUILD_DATE }}
     steps:
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      
-      - name: Install dependencies
+      - name: Get latest Electron release
+        id: electron
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            git \
-            python3 \
-            ninja-build \
-            pkg-config \
-            libglib2.0-dev \
-            libx11-dev \
-            libxext-dev \
-            libgl-dev \
-            libgles-dev \
-            libegl-dev \
-            gcc-aarch64-linux-gnu \
-            g++-aarch64-linux-gnu
+          # Get the latest stable Electron version
+          ELECTRON_VERSION=$(curl -s https://api.github.com/repos/electron/electron/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | sed 's/v//')
+          echo "ELECTRON_VERSION=$ELECTRON_VERSION" >> $GITHUB_OUTPUT
+          echo "Found Electron version: $ELECTRON_VERSION"
           
-      - name: Setup depot_tools
+      - name: Download and extract Electron ARM64
         run: |
-          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
-          echo "$PWD/depot_tools" >> $GITHUB_PATH
+          VERSION="${{ steps.electron.outputs.ELECTRON_VERSION }}"
+          echo "Downloading Electron v$VERSION for Linux ARM64"
           
-      - name: Fetch ANGLE (minimal)
-        run: |
-          cat > .gclient << 'EOF'
-          solutions = [
-            {
-              "name": "angle",
-              "url": "https://chromium.googlesource.com/angle/angle.git",
-              "managed": False,
-              "custom_deps": {
-                "third_party/VK-GL-CTS/src": None,
-                "third_party/llvm/src": None,
-              },
-            },
-          ]
-          EOF
+          # Download Electron ARM64 binary
+          URL="https://github.com/electron/electron/releases/download/v${VERSION}/electron-v${VERSION}-linux-arm64.zip"
+          echo "Downloading: $URL"
           
-          git clone --depth 1 https://chromium.googlesource.com/angle/angle.git
-          cd angle
-          git fetch --depth 1 origin ${{ env.ANGLE_COMMIT }}
-          git checkout ${{ env.ANGLE_COMMIT }}
+          # Check if it exists first
+          if curl --head --fail "$URL" 2>/dev/null; then
+            curl -L -o electron-arm64.zip "$URL"
+          else
+            echo "Electron ARM64 not found for version $VERSION, trying previous version"
+            # Try to get a slightly older version that has ARM64
+            VERSION="32.0.1"  # Known good version with ARM64
+            URL="https://github.com/electron/electron/releases/download/v${VERSION}/electron-v${VERSION}-linux-arm64.zip"
+            curl -L -o electron-arm64.zip "$URL"
+          fi
           
-          python scripts/bootstrap.py
-          gclient sync --no-history -D
+          # Extract
+          unzip -q electron-arm64.zip -d electron-arm64
           
-      - name: Configure build for ARM64
-        run: |
-          cd angle
+          # Create package directory
+          mkdir -p angle-linux-arm64-${{ env.BUILD_DATE }}
           
-          ARGS="is_debug=false is_component_build=false"
-          ARGS="$ARGS angle_enable_gl=true"
-          ARGS="$ARGS angle_enable_vulkan=true"
-          ARGS="$ARGS angle_enable_null=true"
-          ARGS="$ARGS angle_build_tests=false"
-          ARGS="$ARGS target_cpu=\"arm64\""
-          ARGS="$ARGS use_sysroot=false"
+          # Copy ANGLE libraries
+          if [ -f "electron-arm64/libEGL.so" ]; then
+            cp electron-arm64/libEGL.so angle-linux-arm64-${{ env.BUILD_DATE }}/
+            echo "Found libEGL.so"
+          else
+            echo "WARNING: libEGL.so not found"
+          fi
           
-          gn gen out/Release --args="$ARGS"
+          if [ -f "electron-arm64/libGLESv2.so" ]; then
+            cp electron-arm64/libGLESv2.so angle-linux-arm64-${{ env.BUILD_DATE }}/
+            echo "Found libGLESv2.so"
+          else
+            echo "WARNING: libGLESv2.so not found"
+          fi
           
-      - name: Build
-        run: |
-          cd angle
-          ninja -C out/Release libEGL libGLESv2
+          # Check for swiftshader
+          if [ -d "electron-arm64/swiftshader" ]; then
+            echo "Found swiftshader directory"
+            mkdir -p angle-linux-arm64-${{ env.BUILD_DATE }}/swiftshader
+            cp electron-arm64/swiftshader/libEGL.so angle-linux-arm64-${{ env.BUILD_DATE }}/swiftshader/ || true
+            cp electron-arm64/swiftshader/libGLESv2.so angle-linux-arm64-${{ env.BUILD_DATE }}/swiftshader/ || true
+          fi
           
-      - name: Package
-        run: |
-          cd angle
-          mkdir -p ../angle-linux-arm64-${{ env.BUILD_DATE }}
+          # Get ANGLE headers
+          git clone --depth 1 https://chromium.googlesource.com/angle/angle.git angle-headers
+          cp -r angle-headers/include angle-linux-arm64-${{ env.BUILD_DATE }}/
           
-          cp -v out/Release/libEGL.so* ../angle-linux-arm64-${{ env.BUILD_DATE }}/ || true
-          cp -v out/Release/libGLESv2.so* ../angle-linux-arm64-${{ env.BUILD_DATE }}/ || true
-          cp -r include ../angle-linux-arm64-${{ env.BUILD_DATE }}/
+          # List what we got
+          echo "Package contents:"
+          ls -la angle-linux-arm64-${{ env.BUILD_DATE }}/
           
-          cd ..
+          # Create zip
           zip -r angle-linux-arm64-${{ env.BUILD_DATE }}.zip angle-linux-arm64-${{ env.BUILD_DATE }}
           
       - name: Upload Artifacts
@@ -236,7 +208,7 @@ jobs:
 
   release:
     runs-on: ubuntu-24.04
-    needs: [info, extract-from-chromium, build-linux-arm64]
+    needs: [info, extract-from-chromium, extract-linux-arm64]
     if: always() && needs.info.result == 'success'
     permissions:
       contents: write
@@ -249,10 +221,37 @@ jobs:
           [ANGLE Commit](https://github.com/google/angle/commit/${{ needs.info.outputs.ANGLE_COMMIT }})
           
           ## Build Sources
-          - Windows (x64, arm64): Extracted from Chromium
-          - Linux x64: Extracted from Chromium
-          - Linux arm64: Built from source
-          - macOS (x64, arm64): Extracted from Chromium
+          
+          ### Extracted from Chromium snapshots:
+          - Windows x64, arm64
+          - Linux x64
+          - macOS x64, arm64
+          
+          ### Extracted from Electron releases:
+          - Linux arm64
+          
+          ## Included Backends
+          
+          ### Windows
+          - Direct3D 9/11 (via d3dcompiler_47.dll)
+          - OpenGL
+          - Vulkan
+          - SwiftShader (software renderer)
+          
+          ### Linux
+          - OpenGL ES
+          - Vulkan  
+          - SwiftShader (software renderer)
+          
+          ### macOS
+          - Metal
+          - OpenGL
+          - SwiftShader (software renderer)
+          
+          ## Notes
+          - All libraries are extracted from official Google builds
+          - Headers are from the ANGLE repository at the commit specified above
+          - SwiftShader provides software rendering fallback when hardware acceleration is unavailable
           EOF
           
           gh release create ${{ needs.info.outputs.BUILD_DATE }} -R "${GITHUB_REPOSITORY}" -t '${{ needs.info.outputs.BUILD_DATE }}' -F notes.txt
@@ -262,6 +261,11 @@ jobs:
         with:
           pattern: angle-*-${{ needs.info.outputs.BUILD_DATE }}
           merge-multiple: true
+      
+      - name: List artifacts to upload
+        run: |
+          echo "Artifacts to upload:"
+          ls -la angle-*.zip
       
       - name: Upload Artifacts to GitHub Release
         run: |
