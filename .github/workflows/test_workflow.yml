@@ -18,30 +18,6 @@ jobs:
           echo ANGLE_COMMIT=`git ls-remote https://chromium.googlesource.com/angle/angle HEAD | awk '{ print $1 }'` >> ${GITHUB_OUTPUT}
           echo BUILD_DATE=`date +'%Y-%m-%d'` >> ${GITHUB_OUTPUT}
 
-  build-windows:
-    runs-on: windows-2022
-    needs: info
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [x64, arm64]
-    env:
-      ANGLE_COMMIT: ${{ needs.info.outputs.ANGLE_COMMIT }}
-      BUILD_DATE: ${{ needs.info.outputs.BUILD_DATE }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Run Build Script
-        shell: cmd
-        run: call build.cmd ${{ matrix.arch }}
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: angle-windows-${{ matrix.arch }}-${{ needs.info.outputs.BUILD_DATE }}
-          path: angle-${{ matrix.arch }}-${{ needs.info.outputs.BUILD_DATE }}.zip
-          if-no-files-found: error
-          compression-level: 0
-
   extract-from-chromium:
     runs-on: ubuntu-24.04
     needs: info
@@ -49,6 +25,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - platform: windows
+            arch: x64
+            chromium_platform: Win_x64
+          - platform: windows
+            arch: arm64
+            chromium_platform: Win_Arm64
           - platform: linux
             arch: x64
             chromium_platform: Linux_x64
@@ -64,107 +46,87 @@ jobs:
       - name: Get latest Chromium build
         id: chromium
         run: |
-          # Get the LAST_CHANGE file which contains the latest build number
-          if [ "${{ matrix.chromium_platform }}" = "Linux_x64" ]; then
-            LAST_CHANGE_URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots/Linux_x64/LAST_CHANGE"
-          elif [ "${{ matrix.chromium_platform }}" = "Mac" ]; then
-            LAST_CHANGE_URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots/Mac/LAST_CHANGE"
-          elif [ "${{ matrix.chromium_platform }}" = "Mac_Arm" ]; then
-            LAST_CHANGE_URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots/Mac_Arm/LAST_CHANGE"
+          LAST_CHANGE_URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots/${{ matrix.chromium_platform }}/LAST_CHANGE"
+          
+          if curl -s --head "$LAST_CHANGE_URL" | head -n 1 | grep "200\|301\|302" > /dev/null; then
+            POSITION=$(curl -s "$LAST_CHANGE_URL")
+            echo "POSITION=$POSITION" >> $GITHUB_OUTPUT
+            echo "Found Chromium build: $POSITION for ${{ matrix.chromium_platform }}"
+          else
+            echo "Platform ${{ matrix.chromium_platform }} not available"
+            echo "POSITION=skip" >> $GITHUB_OUTPUT
           fi
           
-          POSITION=$(curl -s "$LAST_CHANGE_URL")
-          echo "POSITION=$POSITION" >> $GITHUB_OUTPUT
-          echo "Found Chromium build: $POSITION"
-          
       - name: Download Chromium
+        if: steps.chromium.outputs.POSITION != 'skip'
         run: |
           BASE_URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots"
           POSITION="${{ steps.chromium.outputs.POSITION }}"
           
-          if [ "${{ matrix.platform }}" = "linux" ]; then
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            URL="${BASE_URL}/${{ matrix.chromium_platform }}/${POSITION}/chrome-win.zip"
+            echo "Downloading from: $URL"
+            curl -L -o chromium.zip "$URL"
+          elif [ "${{ matrix.platform }}" = "linux" ]; then
             URL="${BASE_URL}/Linux_x64/${POSITION}/chrome-linux.zip"
             echo "Downloading from: $URL"
             curl -L -o chromium.zip "$URL"
           elif [ "${{ matrix.platform }}" = "mac" ]; then
-            if [ "${{ matrix.arch }}" = "arm64" ]; then
-              URL="${BASE_URL}/Mac_Arm/${POSITION}/chrome-mac.zip"
-            else
-              URL="${BASE_URL}/Mac/${POSITION}/chrome-mac.zip"
-            fi
+            URL="${BASE_URL}/${{ matrix.chromium_platform }}/${POSITION}/chrome-mac.zip"
             echo "Downloading from: $URL"
             curl -L -o chromium.zip "$URL"
           fi
           
       - name: Extract ANGLE libraries
+        if: steps.chromium.outputs.POSITION != 'skip'
         run: |
-          unzip -q chromium.zip || (echo "Failed to unzip, checking contents:" && unzip -l chromium.zip | head -20)
+          unzip -q chromium.zip
           
           mkdir -p angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}
           
-          if [ "${{ matrix.platform }}" = "linux" ]; then
-            # Linux: Libraries are in the chrome-linux directory
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            if [ -d "chrome-win" ]; then
+              CHROME_DIR="chrome-win"
+            else
+              echo "Chrome directory not found"
+              ls -la
+              exit 1
+            fi
+            
+            cp $CHROME_DIR/libEGL.dll angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || echo "libEGL.dll not found"
+            cp $CHROME_DIR/libGLESv2.dll angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || echo "libGLESv2.dll not found"
+            cp $CHROME_DIR/d3dcompiler_*.dll angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || true
+            
+            if [ -d "$CHROME_DIR/swiftshader" ]; then
+              cp $CHROME_DIR/swiftshader/libEGL.dll angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/swiftshader_libEGL.dll || true
+              cp $CHROME_DIR/swiftshader/libGLESv2.dll angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/swiftshader_libGLESv2.dll || true
+            fi
+            
+          elif [ "${{ matrix.platform }}" = "linux" ]; then
             if [ -d "chrome-linux" ]; then
               cp chrome-linux/libEGL.so angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || echo "libEGL.so not found"
               cp chrome-linux/libGLESv2.so angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || echo "libGLESv2.so not found"
               
-              # Also check for swiftshader versions
               if [ -d "chrome-linux/swiftshader" ]; then
                 cp chrome-linux/swiftshader/libEGL.so angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/swiftshader_libEGL.so || true
                 cp chrome-linux/swiftshader/libGLESv2.so angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/swiftshader_libGLESv2.so || true
               fi
-            else
-              echo "chrome-linux directory not found, listing contents:"
-              ls -la
             fi
+            
           elif [ "${{ matrix.platform }}" = "mac" ]; then
-            # Mac: Libraries are inside the .app bundle
-            if [ -d "chrome-mac" ]; then
-              # Find the Chromium.app
-              APP_PATH="chrome-mac/Chromium.app"
-              if [ -d "$APP_PATH" ]; then
-                # Libraries are typically in Contents/Frameworks
-                FRAMEWORK_PATH="$APP_PATH/Contents/Frameworks"
-                if [ -d "$FRAMEWORK_PATH" ]; then
-                  find "$FRAMEWORK_PATH" -name "libEGL.dylib" -exec cp {} angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ \; || echo "libEGL.dylib not found"
-                  find "$FRAMEWORK_PATH" -name "libGLESv2.dylib" -exec cp {} angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ \; || echo "libGLESv2.dylib not found"
-                  
-                  # List what we found
-                  echo "Found libraries:"
-                  ls -la angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
-                else
-                  echo "Frameworks directory not found, searching entire app:"
-                  find "$APP_PATH" -name "*.dylib" | head -20
-                fi
-              else
-                echo "Chromium.app not found, listing chrome-mac contents:"
-                ls -la chrome-mac/
-              fi
-            else
-              echo "chrome-mac directory not found, listing contents:"
-              ls -la
+            APP_PATH="chrome-mac/Chromium.app"
+            if [ -d "$APP_PATH/Contents/Frameworks" ]; then
+              find "$APP_PATH/Contents/Frameworks" -name "libEGL.dylib" -exec cp {} angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ \;
+              find "$APP_PATH/Contents/Frameworks" -name "libGLESv2.dylib" -exec cp {} angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ \;
             fi
           fi
           
-          # Get ANGLE headers from the repository
+          # Get ANGLE headers
           git clone --depth 1 https://chromium.googlesource.com/angle/angle.git angle-headers
           cp -r angle-headers/include angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
           
-          # Check what we have
-          echo "Final package contents:"
-          ls -la angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
-          
-          # Create zip only if we have the libraries
-          if [ -f "angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/libEGL.so" ] || \
-             [ -f "angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/libEGL.dylib" ] || \
-             [ -f "angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/libGLESv2.so" ] || \
-             [ -f "angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/libGLESv2.dylib" ]; then
-            zip -r angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}
-          else
-            echo "ERROR: No ANGLE libraries found!"
-            # Create a zip with just headers as fallback
-            zip -r angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}
-          fi
+          # Create zip
+          zip -r angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}
           
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
@@ -174,9 +136,107 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
+  build-linux-arm64:
+    runs-on: ubuntu-24.04
+    needs: info
+    env:
+      ANGLE_COMMIT: ${{ needs.info.outputs.ANGLE_COMMIT }}
+      BUILD_DATE: ${{ needs.info.outputs.BUILD_DATE }}
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            git \
+            python3 \
+            ninja-build \
+            pkg-config \
+            libglib2.0-dev \
+            libx11-dev \
+            libxext-dev \
+            libgl-dev \
+            libgles-dev \
+            libegl-dev \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu
+          
+      - name: Setup depot_tools
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "$PWD/depot_tools" >> $GITHUB_PATH
+          
+      - name: Fetch ANGLE (minimal)
+        run: |
+          cat > .gclient << 'EOF'
+          solutions = [
+            {
+              "name": "angle",
+              "url": "https://chromium.googlesource.com/angle/angle.git",
+              "managed": False,
+              "custom_deps": {
+                "third_party/VK-GL-CTS/src": None,
+                "third_party/llvm/src": None,
+              },
+            },
+          ]
+          EOF
+          
+          git clone --depth 1 https://chromium.googlesource.com/angle/angle.git
+          cd angle
+          git fetch --depth 1 origin ${{ env.ANGLE_COMMIT }}
+          git checkout ${{ env.ANGLE_COMMIT }}
+          
+          python scripts/bootstrap.py
+          gclient sync --no-history -D
+          
+      - name: Configure build for ARM64
+        run: |
+          cd angle
+          
+          ARGS="is_debug=false is_component_build=false"
+          ARGS="$ARGS angle_enable_gl=true"
+          ARGS="$ARGS angle_enable_vulkan=true"
+          ARGS="$ARGS angle_enable_null=true"
+          ARGS="$ARGS angle_build_tests=false"
+          ARGS="$ARGS target_cpu=\"arm64\""
+          ARGS="$ARGS use_sysroot=false"
+          
+          gn gen out/Release --args="$ARGS"
+          
+      - name: Build
+        run: |
+          cd angle
+          ninja -C out/Release libEGL libGLESv2
+          
+      - name: Package
+        run: |
+          cd angle
+          mkdir -p ../angle-linux-arm64-${{ env.BUILD_DATE }}
+          
+          cp -v out/Release/libEGL.so* ../angle-linux-arm64-${{ env.BUILD_DATE }}/ || true
+          cp -v out/Release/libGLESv2.so* ../angle-linux-arm64-${{ env.BUILD_DATE }}/ || true
+          cp -r include ../angle-linux-arm64-${{ env.BUILD_DATE }}/
+          
+          cd ..
+          zip -r angle-linux-arm64-${{ env.BUILD_DATE }}.zip angle-linux-arm64-${{ env.BUILD_DATE }}
+          
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: angle-linux-arm64-${{ needs.info.outputs.BUILD_DATE }}
+          path: angle-linux-arm64-${{ needs.info.outputs.BUILD_DATE }}.zip
+          if-no-files-found: error
+          compression-level: 0
+
   release:
     runs-on: ubuntu-24.04
-    needs: [info, build-windows, extract-from-chromium]
+    needs: [info, extract-from-chromium, build-linux-arm64]
     if: always() && needs.info.result == 'success'
     permissions:
       contents: write
@@ -189,8 +249,10 @@ jobs:
           [ANGLE Commit](https://github.com/google/angle/commit/${{ needs.info.outputs.ANGLE_COMMIT }})
           
           ## Build Sources
-          - Windows: Built from source
-          - Linux/macOS: Extracted from Chromium stable builds
+          - Windows (x64, arm64): Extracted from Chromium
+          - Linux x64: Extracted from Chromium
+          - Linux arm64: Built from source
+          - macOS (x64, arm64): Extracted from Chromium
           EOF
           
           gh release create ${{ needs.info.outputs.BUILD_DATE }} -R "${GITHUB_REPOSITORY}" -t '${{ needs.info.outputs.BUILD_DATE }}' -F notes.txt
@@ -203,6 +265,9 @@ jobs:
       
       - name: Upload Artifacts to GitHub Release
         run: |
-          for file in angle-*.zip; do
-            [ -f "$file" ] && gh release upload '${{ needs.info.outputs.BUILD_DATE }}' "$file" -R "${GITHUB_REPOSITORY}"
+          for file in angle-*-${{ needs.info.outputs.BUILD_DATE }}.zip; do
+            if [ -f "$file" ]; then
+              echo "Uploading $file"
+              gh release upload '${{ needs.info.outputs.BUILD_DATE }}' "$file" -R "${GITHUB_REPOSITORY}"
+            fi
           done
