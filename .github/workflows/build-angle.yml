@@ -1,5 +1,7 @@
 name: build-angle
 on:
+  schedule:
+    - cron: "0 0 * * 0"
   push:
     branches:
       - main
@@ -19,6 +21,7 @@ jobs:
   build:
     needs: info
     strategy:
+      fail-fast: false  # Don't cancel other jobs if one fails
       matrix:
         include:
           # Windows builds
@@ -34,7 +37,7 @@ jobs:
             arch: x64
             os_name: linux
           
-          # Linux ARM64 build (using self-hosted or QEMU)
+          # Linux ARM64 build
           - os: ubuntu-24.04
             arch: arm64
             os_name: linux
@@ -58,141 +61,64 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       
-      # Windows-specific setup
-      - name: Setup Windows Build Environment
+      # Windows build - just use your existing build.cmd
+      - name: Build on Windows
         if: matrix.os_name == 'windows'
         shell: cmd
         run: |
-          echo Setting up Windows build environment
-          # Uncomment if needed:
-          # "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" modify --installPath "C:\Program Files\Microsoft Visual Studio\2022\Enterprise" --quiet --force --norestart --add Microsoft.VisualStudio.Component.Windows11SDK.26100
+          call build.cmd ${{ matrix.arch }}
+          if exist angle-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip (
+            move angle-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip
+          )
       
-      # Linux-specific setup
+      # Linux-specific setup and build
       - name: Setup Linux Build Environment
         if: matrix.os_name == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential git python3 python3-pip ninja-build
-          # Install depot_tools dependencies
           sudo apt-get install -y curl lsb-release sudo
           # For ARM64 cross-compilation on x64 host
           if [ "${{ matrix.arch }}" = "arm64" ] && [ "$(uname -m)" = "x86_64" ]; then
             sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
           fi
       
-      # macOS-specific setup
-      - name: Setup macOS Build Environment
-        if: matrix.os_name == 'macos'
-        run: |
-          brew install ninja python3
-          # Ensure Xcode command line tools are installed
-          xcode-select --install 2>/dev/null || true
-      
-      # Build for Windows
-      - name: Build on Windows
-        if: matrix.os_name == 'windows'
-        shell: cmd
-        run: call build.cmd ${{ matrix.arch }}
-      
-      # Build for Linux
       - name: Build on Linux
         if: matrix.os_name == 'linux'
         run: |
-          # Check if build script exists, otherwise use generic build commands
           if [ -f "build-linux.sh" ]; then
             chmod +x build-linux.sh
             ./build-linux.sh ${{ matrix.arch }}
           else
-            # Generic ANGLE build steps for Linux
-            echo "No build-linux.sh found, using generic build steps"
-            # Clone depot_tools
-            git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
-            export PATH="$PWD/depot_tools:$PATH"
-            
-            # Get ANGLE source
-            git clone https://chromium.googlesource.com/angle/angle
-            cd angle
-            git checkout ${{ env.ANGLE_COMMIT }}
-            
-            # Sync dependencies
-            python scripts/bootstrap.py
-            gclient sync
-            
-            # Configure build
-            if [ "${{ matrix.arch }}" = "arm64" ]; then
-              gn gen out/Release --args='is_debug=false target_cpu="arm64"'
-            else
-              gn gen out/Release --args='is_debug=false target_cpu="x64"'
-            fi
-            
-            # Build
-            ninja -C out/Release
-            
-            # Package
-            cd ..
-            mkdir -p angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}
-            cp -r angle/out/Release/* angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
-            zip -r angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}
+            echo "No build-linux.sh found, please create one"
+            exit 1
+          fi
+          # Rename to include OS name
+          if [ -f "angle-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip" ]; then
+            mv angle-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip
           fi
       
-      # Build for macOS
+      # macOS-specific setup and build
+      - name: Setup macOS Build Environment
+        if: matrix.os_name == 'macos'
+        run: |
+          brew install ninja python3
+          xcode-select --install 2>/dev/null || true
+      
       - name: Build on macOS
         if: matrix.os_name == 'macos'
         run: |
-          # Check if build script exists, otherwise use generic build commands
           if [ -f "build-macos.sh" ]; then
             chmod +x build-macos.sh
             ./build-macos.sh ${{ matrix.arch }}
           else
-            # Generic ANGLE build steps for macOS
-            echo "No build-macos.sh found, using generic build steps"
-            # Clone depot_tools
-            git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
-            export PATH="$PWD/depot_tools:$PATH"
-            
-            # Get ANGLE source
-            git clone https://chromium.googlesource.com/angle/angle
-            cd angle
-            git checkout ${{ env.ANGLE_COMMIT }}
-            
-            # Sync dependencies
-            python3 scripts/bootstrap.py
-            gclient sync
-            
-            # Configure build
-            if [ "${{ matrix.arch }}" = "arm64" ]; then
-              gn gen out/Release --args='is_debug=false target_cpu="arm64"'
-            else
-              gn gen out/Release --args='is_debug=false target_cpu="x64"'
-            fi
-            
-            # Build
-            ninja -C out/Release
-            
-            # Package
-            cd ..
-            mkdir -p angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}
-            cp -r angle/out/Release/* angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
-            zip -r angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}
+            echo "No build-macos.sh found, please create one"
+            exit 1
           fi
-      
-      # Create artifact name that works for all platforms
-      - name: Prepare Artifact
-        if: matrix.os_name != 'windows'
-        run: |
-          # Ensure the zip file exists with the correct naming
-          if [ ! -f "angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip" ]; then
-            echo "Creating zip archive..."
-            zip -r angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}
+          # Rename to include OS name
+          if [ -f "angle-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip" ]; then
+            mv angle-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip
           fi
-      
-      - name: Prepare Artifact (Windows)
-        if: matrix.os_name == 'windows'
-        shell: cmd
-        run: |
-          if not exist angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip (
-            move angle-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip
-          )
       
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
@@ -205,6 +131,7 @@ jobs:
   release:
     runs-on: ubuntu-24.04
     needs: [info, build]
+    if: always() && needs.info.result == 'success'  # Run even if some builds fail
     permissions:
       contents: write
     env:
@@ -226,5 +153,14 @@ jobs:
           pattern: angle-*-${{ needs.info.outputs.BUILD_DATE }}
           merge-multiple: true
       
+      - name: List Available Artifacts
+        run: ls -la angle-*.zip || echo "No artifacts found"
+      
       - name: Upload Artifacts to GitHub Release
-        run: gh release upload '${{ needs.info.outputs.BUILD_DATE }}' angle-*-${{ needs.info.outputs.BUILD_DATE }}.zip -R "${GITHUB_REPOSITORY}"
+        run: |
+          for file in angle-*-${{ needs.info.outputs.BUILD_DATE }}.zip; do
+            if [ -f "$file" ]; then
+              echo "Uploading $file"
+              gh release upload '${{ needs.info.outputs.BUILD_DATE }}' "$file" -R "${GITHUB_REPOSITORY}"
+            fi
+          done
