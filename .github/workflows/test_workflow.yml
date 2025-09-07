@@ -61,53 +61,88 @@ jobs:
     env:
       BUILD_DATE: ${{ needs.info.outputs.BUILD_DATE }}
     steps:
-      - name: Get Chromium version info
+      - name: Get latest Chromium build
         id: chromium
         run: |
-          # Get the latest stable Chromium version
-          CHROMIUM_VERSION=$(curl -s https://chromiumdash.appspot.com/fetch_releases?channel=Stable\&platform=${{ matrix.chromium_platform }}\&num=1 | python3 -c "import sys, json; print(json.load(sys.stdin)[0]['version'])")
-          echo "CHROMIUM_VERSION=$CHROMIUM_VERSION" >> $GITHUB_OUTPUT
+          # Get the LAST_CHANGE file which contains the latest build number
+          if [ "${{ matrix.chromium_platform }}" = "Linux_x64" ]; then
+            LAST_CHANGE_URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots/Linux_x64/LAST_CHANGE"
+          elif [ "${{ matrix.chromium_platform }}" = "Mac" ]; then
+            LAST_CHANGE_URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots/Mac/LAST_CHANGE"
+          elif [ "${{ matrix.chromium_platform }}" = "Mac_Arm" ]; then
+            LAST_CHANGE_URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots/Mac_Arm/LAST_CHANGE"
+          fi
           
-          # Get the position number for downloading
-          POSITION=$(curl -s "https://omahaproxy.appspot.com/deps.json?version=$CHROMIUM_VERSION" | python3 -c "import sys, json; print(json.load(sys.stdin)['chromium_base_position'])")
+          POSITION=$(curl -s "$LAST_CHANGE_URL")
           echo "POSITION=$POSITION" >> $GITHUB_OUTPUT
+          echo "Found Chromium build: $POSITION"
           
       - name: Download Chromium
         run: |
-          # Chromium snapshot builds are available at:
           BASE_URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots"
+          POSITION="${{ steps.chromium.outputs.POSITION }}"
           
           if [ "${{ matrix.platform }}" = "linux" ]; then
-            URL="${BASE_URL}/Linux_x64/${{ steps.chromium.outputs.POSITION }}/chrome-linux.zip"
+            URL="${BASE_URL}/Linux_x64/${POSITION}/chrome-linux.zip"
+            echo "Downloading from: $URL"
             curl -L -o chromium.zip "$URL"
           elif [ "${{ matrix.platform }}" = "mac" ]; then
             if [ "${{ matrix.arch }}" = "arm64" ]; then
-              URL="${BASE_URL}/Mac_Arm/${{ steps.chromium.outputs.POSITION }}/chrome-mac.zip"
+              URL="${BASE_URL}/Mac_Arm/${POSITION}/chrome-mac.zip"
             else
-              URL="${BASE_URL}/Mac/${{ steps.chromium.outputs.POSITION }}/chrome-mac.zip"
+              URL="${BASE_URL}/Mac/${POSITION}/chrome-mac.zip"
             fi
+            echo "Downloading from: $URL"
             curl -L -o chromium.zip "$URL"
           fi
           
       - name: Extract ANGLE libraries
         run: |
-          unzip -q chromium.zip
+          unzip -q chromium.zip || (echo "Failed to unzip, checking contents:" && unzip -l chromium.zip | head -20)
           
           mkdir -p angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}
           
           if [ "${{ matrix.platform }}" = "linux" ]; then
-            # Linux: Find and copy libEGL.so and libGLESv2.so
-            find chrome-linux -name "libEGL.so" -exec cp {} angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ \;
-            find chrome-linux -name "libGLESv2.so" -exec cp {} angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ \;
-            # Also grab swiftshader if available
-            find chrome-linux -name "libEGL.so" -path "*/swiftshader/*" -exec cp {} angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/swiftshader_libEGL.so \; || true
-            find chrome-linux -name "libGLESv2.so" -path "*/swiftshader/*" -exec cp {} angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/swiftshader_libGLESv2.so \; || true
+            # Linux: Libraries are in the chrome-linux directory
+            if [ -d "chrome-linux" ]; then
+              cp chrome-linux/libEGL.so angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || echo "libEGL.so not found"
+              cp chrome-linux/libGLESv2.so angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || echo "libGLESv2.so not found"
+              
+              # Also check for swiftshader versions
+              if [ -d "chrome-linux/swiftshader" ]; then
+                cp chrome-linux/swiftshader/libEGL.so angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/swiftshader_libEGL.so || true
+                cp chrome-linux/swiftshader/libGLESv2.so angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/swiftshader_libGLESv2.so || true
+              fi
+            else
+              echo "chrome-linux directory not found, listing contents:"
+              ls -la
+            fi
           elif [ "${{ matrix.platform }}" = "mac" ]; then
-            # Mac: Find and copy libEGL.dylib and libGLESv2.dylib from the app bundle
-            APP_PATH=$(find . -name "*.app" -type d | head -1)
-            if [ -n "$APP_PATH" ]; then
-              find "$APP_PATH" -name "libEGL.dylib" -exec cp {} angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ \;
-              find "$APP_PATH" -name "libGLESv2.dylib" -exec cp {} angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ \;
+            # Mac: Libraries are inside the .app bundle
+            if [ -d "chrome-mac" ]; then
+              # Find the Chromium.app
+              APP_PATH="chrome-mac/Chromium.app"
+              if [ -d "$APP_PATH" ]; then
+                # Libraries are typically in Contents/Frameworks
+                FRAMEWORK_PATH="$APP_PATH/Contents/Frameworks"
+                if [ -d "$FRAMEWORK_PATH" ]; then
+                  find "$FRAMEWORK_PATH" -name "libEGL.dylib" -exec cp {} angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ \; || echo "libEGL.dylib not found"
+                  find "$FRAMEWORK_PATH" -name "libGLESv2.dylib" -exec cp {} angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ \; || echo "libGLESv2.dylib not found"
+                  
+                  # List what we found
+                  echo "Found libraries:"
+                  ls -la angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
+                else
+                  echo "Frameworks directory not found, searching entire app:"
+                  find "$APP_PATH" -name "*.dylib" | head -20
+                fi
+              else
+                echo "Chromium.app not found, listing chrome-mac contents:"
+                ls -la chrome-mac/
+              fi
+            else
+              echo "chrome-mac directory not found, listing contents:"
+              ls -la
             fi
           fi
           
@@ -115,8 +150,21 @@ jobs:
           git clone --depth 1 https://chromium.googlesource.com/angle/angle.git angle-headers
           cp -r angle-headers/include angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
           
-          # Create zip
-          zip -r angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}
+          # Check what we have
+          echo "Final package contents:"
+          ls -la angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
+          
+          # Create zip only if we have the libraries
+          if [ -f "angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/libEGL.so" ] || \
+             [ -f "angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/libEGL.dylib" ] || \
+             [ -f "angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/libGLESv2.so" ] || \
+             [ -f "angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}/libGLESv2.dylib" ]; then
+            zip -r angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}
+          else
+            echo "ERROR: No ANGLE libraries found!"
+            # Create a zip with just headers as fallback
+            zip -r angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}
+          fi
           
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
