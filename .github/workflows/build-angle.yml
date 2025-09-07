@@ -34,7 +34,6 @@ jobs:
       - name: Run Build Script
         shell: cmd
         run: call build.cmd ${{ matrix.arch }}
-      # FIX: Rename the output from build.cmd to match expected naming
       - name: Rename artifact
         shell: cmd
         run: |
@@ -65,20 +64,35 @@ jobs:
         with:
           python-version: '3.11'
       
-      - name: Install initial dependencies
+      # Install ONLY the essential dependencies for building ANGLE
+      - name: Install minimal dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git build-essential python3 python3-pip ninja-build
+          sudo apt-get install -y \
+            build-essential \
+            git \
+            python3 \
+            ninja-build \
+            pkg-config \
+            libx11-dev \
+            libxext-dev \
+            libgl-dev \
+            libgles-dev \
+            libegl-dev
+          
+          # Only for ARM64 cross-compilation
+          if [ "${{ matrix.arch }}" = "arm64" ] && [ "$(uname -m)" = "x86_64" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          fi
           
       - name: Setup depot_tools
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "$PWD/depot_tools" >> $GITHUB_PATH
           
-      # FIX: Use a minimal .gclient to avoid downloading test dependencies
       - name: Fetch ANGLE (minimal)
         run: |
-          # Create a minimal .gclient that skips test dependencies
+          # Create a minimal .gclient
           cat > .gclient << 'EOF'
           solutions = [
             {
@@ -86,50 +100,33 @@ jobs:
               "url": "https://chromium.googlesource.com/angle/angle.git",
               "managed": False,
               "custom_deps": {
-                # Skip heavy test dependencies
                 "third_party/VK-GL-CTS/src": None,
                 "third_party/llvm/src": None,
-              },
-              "custom_vars": {
-                "angle_skip_tests": True,
               },
             },
           ]
           EOF
           
-          # Clone ANGLE with minimal history
           git clone --depth 1 https://chromium.googlesource.com/angle/angle.git
           cd angle
           git fetch --depth 1 origin ${{ env.ANGLE_COMMIT }}
           git checkout ${{ env.ANGLE_COMMIT }}
           
-          # Bootstrap and sync with minimal dependencies
           python scripts/bootstrap.py
           gclient sync --no-history -D
           
-      - name: Install build dependencies
-        run: |
-          cd angle
-          if [ -f "build/install-build-deps.sh" ]; then
-            ./build/install-build-deps.sh
-          fi
-          # Install cross-compilation tools for ARM64 if needed
-          if [ "${{ matrix.arch }}" = "arm64" ] && [ "$(uname -m)" = "x86_64" ]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-          fi
+      # Skip install-build-deps.sh - it installs too much unnecessary stuff
           
       - name: Configure build
         run: |
           cd angle
           
-          # Build with all Linux-supported backends
           ARGS="is_debug=false is_component_build=false"
           ARGS="$ARGS angle_enable_gl=true"
           ARGS="$ARGS angle_enable_vulkan=true"
           ARGS="$ARGS angle_enable_null=true"
-          ARGS="$ARGS angle_build_tests=false"  # Skip test builds
+          ARGS="$ARGS angle_build_tests=false"
           
-          # Set architecture
           if [ "${{ matrix.arch }}" = "arm64" ]; then
             ARGS="$ARGS target_cpu=\"arm64\""
             if [ "$(uname -m)" = "x86_64" ]; then
@@ -151,11 +148,8 @@ jobs:
           cd angle
           mkdir -p ../angle-linux-${{ matrix.arch }}-${{ env.BUILD_DATE }}
           
-          # Copy libraries
           cp -v out/Release/libEGL.so* ../angle-linux-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || true
           cp -v out/Release/libGLESv2.so* ../angle-linux-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || true
-          
-          # Copy headers
           cp -r include ../angle-linux-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
           
           cd ..
@@ -194,10 +188,8 @@ jobs:
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "$PWD/depot_tools" >> $GITHUB_PATH
           
-      # FIX: Use minimal fetch for macOS too
       - name: Fetch ANGLE (minimal)
         run: |
-          # Create a minimal .gclient
           cat > .gclient << 'EOF'
           solutions = [
             {
@@ -207,9 +199,6 @@ jobs:
               "custom_deps": {
                 "third_party/VK-GL-CTS/src": None,
                 "third_party/llvm/src": None,
-              },
-              "custom_vars": {
-                "angle_skip_tests": True,
               },
             },
           ]
@@ -227,14 +216,15 @@ jobs:
         run: |
           cd angle
           
-          # Build with all macOS-supported backends
+          # FIX: Specify mac_sdk_min to use available SDK version 14
           ARGS="is_debug=false is_component_build=false"
           ARGS="$ARGS angle_enable_metal=true"
           ARGS="$ARGS angle_enable_gl=true"
           ARGS="$ARGS angle_enable_null=true"
           ARGS="$ARGS angle_build_tests=false"
+          ARGS="$ARGS mac_sdk_min=\"14.0\""  # Use SDK 14 instead of 15
+          ARGS="$ARGS mac_deployment_target=\"11.0\""  # Minimum deployment target
           
-          # Set architecture
           if [ "${{ matrix.arch }}" = "arm64" ]; then
             ARGS="$ARGS target_cpu=\"arm64\""
           else
@@ -253,11 +243,8 @@ jobs:
           cd angle
           mkdir -p ../angle-macos-${{ matrix.arch }}-${{ env.BUILD_DATE }}
           
-          # Copy libraries
           cp -v out/Release/libEGL.dylib ../angle-macos-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || true
           cp -v out/Release/libGLESv2.dylib ../angle-macos-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || true
-          
-          # Copy headers
           cp -r include ../angle-macos-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
           
           cd ..
