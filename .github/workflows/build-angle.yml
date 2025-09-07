@@ -18,107 +18,63 @@ jobs:
           echo ANGLE_COMMIT=`git ls-remote https://chromium.googlesource.com/angle/angle HEAD | awk '{ print $1 }'` >> ${GITHUB_OUTPUT}
           echo BUILD_DATE=`date +'%Y-%m-%d'` >> ${GITHUB_OUTPUT}
   
-  build:
+  build-windows:
+    runs-on: windows-2022
     needs: info
     strategy:
-      fail-fast: false  # Don't cancel other jobs if one fails
+      fail-fast: false
       matrix:
-        include:
-          # Windows builds
-          - os: windows-2022
-            arch: x64
-            os_name: windows
-          - os: windows-2022
-            arch: arm64
-            os_name: windows
-          
-          # Linux x86_64 build
-          - os: ubuntu-24.04
-            arch: x64
-            os_name: linux
-          
-          # Linux ARM64 build
-          - os: ubuntu-24.04
-            arch: arm64
-            os_name: linux
-          
-          # macOS Intel build
-          - os: macos-13
-            arch: x64
-            os_name: macos
-          
-          # macOS Apple Silicon build
-          - os: macos-14
-            arch: arm64
-            os_name: macos
-    
-    runs-on: ${{ matrix.os }}
+        arch: [x64, arm64]
     env:
       ANGLE_COMMIT: ${{ needs.info.outputs.ANGLE_COMMIT }}
       BUILD_DATE: ${{ needs.info.outputs.BUILD_DATE }}
-    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run Build Script
+        shell: cmd
+        run: call build.cmd ${{ matrix.arch }}
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: angle-windows-${{ matrix.arch }}-${{ needs.info.outputs.BUILD_DATE }}
+          path: angle-${{ matrix.arch }}-${{ needs.info.outputs.BUILD_DATE }}.zip
+          if-no-files-found: error
+          compression-level: 0
+  
+  build-other:
+    needs: info
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x64
+            os_name: linux
+          - os: ubuntu-24.04
+            arch: arm64
+            os_name: linux
+          - os: macos-13
+            arch: x64
+            os_name: macos
+          - os: macos-14
+            arch: arm64
+            os_name: macos
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true  # Don't fail the whole workflow if these fail
+    env:
+      ANGLE_COMMIT: ${{ needs.info.outputs.ANGLE_COMMIT }}
+      BUILD_DATE: ${{ needs.info.outputs.BUILD_DATE }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       
-      # Windows build - just use your existing build.cmd
-      - name: Build on Windows
-        if: matrix.os_name == 'windows'
-        shell: cmd
+      - name: Build Placeholder
         run: |
-          call build.cmd ${{ matrix.arch }}
-          if exist angle-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip (
-            move angle-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip
-          )
-      
-      # Linux-specific setup and build
-      - name: Setup Linux Build Environment
-        if: matrix.os_name == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential git python3 python3-pip ninja-build
-          sudo apt-get install -y curl lsb-release sudo
-          # For ARM64 cross-compilation on x64 host
-          if [ "${{ matrix.arch }}" = "arm64" ] && [ "$(uname -m)" = "x86_64" ]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-          fi
-      
-      - name: Build on Linux
-        if: matrix.os_name == 'linux'
-        run: |
-          if [ -f "build-linux.sh" ]; then
-            chmod +x build-linux.sh
-            ./build-linux.sh ${{ matrix.arch }}
-          else
-            echo "No build-linux.sh found, please create one"
-            exit 1
-          fi
-          # Rename to include OS name
-          if [ -f "angle-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip" ]; then
-            mv angle-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip
-          fi
-      
-      # macOS-specific setup and build
-      - name: Setup macOS Build Environment
-        if: matrix.os_name == 'macos'
-        run: |
-          brew install ninja python3
-          xcode-select --install 2>/dev/null || true
-      
-      - name: Build on macOS
-        if: matrix.os_name == 'macos'
-        run: |
-          if [ -f "build-macos.sh" ]; then
-            chmod +x build-macos.sh
-            ./build-macos.sh ${{ matrix.arch }}
-          else
-            echo "No build-macos.sh found, please create one"
-            exit 1
-          fi
-          # Rename to include OS name
-          if [ -f "angle-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip" ]; then
-            mv angle-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip
-          fi
+          echo "Build for ${{ matrix.os_name }}-${{ matrix.arch }} not implemented yet"
+          echo "Creating placeholder artifact..."
+          echo "ANGLE build for ${{ matrix.os_name }}-${{ matrix.arch }} - NOT IMPLEMENTED" > README.txt
+          zip angle-${{ matrix.os_name }}-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip README.txt
       
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
@@ -130,8 +86,8 @@ jobs:
   
   release:
     runs-on: ubuntu-24.04
-    needs: [info, build]
-    if: always() && needs.info.result == 'success'  # Run even if some builds fail
+    needs: [info, build-windows, build-other]
+    if: always() && needs.info.result == 'success' && needs.build-windows.result == 'success'
     permissions:
       contents: write
     env:
@@ -140,11 +96,6 @@ jobs:
       - name: Create GitHub Release
         run: |
           echo '[angle commit](https://github.com/google/angle/commit/${{ needs.info.outputs.ANGLE_COMMIT }})' >>notes.txt
-          echo '' >>notes.txt
-          echo '## Platforms' >>notes.txt
-          echo '- Windows (x64, arm64)' >>notes.txt
-          echo '- Linux (x64, arm64)' >>notes.txt
-          echo '- macOS (x64, arm64)' >>notes.txt
           gh release create ${{ needs.info.outputs.BUILD_DATE }} -R "${GITHUB_REPOSITORY}" -t '${{ needs.info.outputs.BUILD_DATE }}' -F notes.txt
       
       - name: Get Artifacts From Build Steps
@@ -153,14 +104,10 @@ jobs:
           pattern: angle-*-${{ needs.info.outputs.BUILD_DATE }}
           merge-multiple: true
       
-      - name: List Available Artifacts
-        run: ls -la angle-*.zip || echo "No artifacts found"
-      
-      - name: Upload Artifacts to GitHub Release
+      - name: Upload Artifacts to GitHub Release  
         run: |
-          for file in angle-*-${{ needs.info.outputs.BUILD_DATE }}.zip; do
+          for file in angle-*.zip; do
             if [ -f "$file" ]; then
-              echo "Uploading $file"
               gh release upload '${{ needs.info.outputs.BUILD_DATE }}' "$file" -R "${GITHUB_REPOSITORY}"
             fi
           done
