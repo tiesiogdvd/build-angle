@@ -28,69 +28,19 @@ jobs:
     env:
       ANGLE_COMMIT: ${{ needs.info.outputs.ANGLE_COMMIT }}
       BUILD_DATE: ${{ needs.info.outputs.BUILD_DATE }}
-      DEPOT_TOOLS_WIN_TOOLCHAIN: 0
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      
-      # Use existing Windows build script if available
-      - name: Check for existing build script
-        id: check_script
-        shell: cmd
-        run: |
-          if exist build.cmd (
-            echo BUILD_SCRIPT_EXISTS=true >> %GITHUB_OUTPUT%
-          ) else (
-            echo BUILD_SCRIPT_EXISTS=false >> %GITHUB_OUTPUT%
-          )
-      
-      - name: Run existing build script
-        if: steps.check_script.outputs.BUILD_SCRIPT_EXISTS == 'true'
+      - name: Run Build Script
         shell: cmd
         run: call build.cmd ${{ matrix.arch }}
-      
-      # Otherwise build from source with all Windows backends
-      - name: Setup Python
-        if: steps.check_script.outputs.BUILD_SCRIPT_EXISTS == 'false'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      
-      - name: Build ANGLE from source
-        if: steps.check_script.outputs.BUILD_SCRIPT_EXISTS == 'false'
+      # FIX: Rename the output from build.cmd to match expected naming
+      - name: Rename artifact
         shell: cmd
         run: |
-          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
-          set PATH=%CD%\depot_tools;%PATH%
-          
-          mkdir angle
-          cd angle
-          fetch angle
-          cd angle
-          git checkout %ANGLE_COMMIT%
-          
-          python scripts/bootstrap.py
-          gclient sync
-          
-          REM Configure with all Windows backends enabled
-          gn gen out/Release --args="is_debug=false is_component_build=false target_cpu=\"${{ matrix.arch }}\" angle_enable_d3d9=true angle_enable_d3d11=true angle_enable_gl=true angle_enable_vulkan=true angle_enable_null=true"
-          
-          ninja -C out/Release
-          
-          REM Package
-          cd ..\..
-          mkdir angle-windows-${{ matrix.arch }}-%BUILD_DATE%
-          xcopy /E /I angle\angle\out\Release\*.dll angle-windows-${{ matrix.arch }}-%BUILD_DATE%\
-          xcopy /E /I angle\angle\out\Release\*.lib angle-windows-${{ matrix.arch }}-%BUILD_DATE%\
-          xcopy /E /I angle\angle\include angle-windows-${{ matrix.arch }}-%BUILD_DATE%\include\
-          
-          powershell Compress-Archive -Path angle-windows-${{ matrix.arch }}-%BUILD_DATE% -DestinationPath angle-windows-${{ matrix.arch }}-%BUILD_DATE%.zip
-          
-          REM If original script exists, ensure consistent naming
-          if exist angle-${{ matrix.arch }}-%BUILD_DATE%.zip (
-            move angle-${{ matrix.arch }}-%BUILD_DATE%.zip angle-windows-${{ matrix.arch }}-%BUILD_DATE%.zip
+          if exist angle-${{ matrix.arch }}-${{ needs.info.outputs.BUILD_DATE }}.zip (
+            move angle-${{ matrix.arch }}-${{ needs.info.outputs.BUILD_DATE }}.zip angle-windows-${{ matrix.arch }}-${{ needs.info.outputs.BUILD_DATE }}.zip
           )
-      
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -118,31 +68,51 @@ jobs:
       - name: Install initial dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git build-essential python3 python3-pip
+          sudo apt-get install -y git build-essential python3 python3-pip ninja-build
           
       - name: Setup depot_tools
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "$PWD/depot_tools" >> $GITHUB_PATH
           
-      - name: Fetch ANGLE
+      # FIX: Use a minimal .gclient to avoid downloading test dependencies
+      - name: Fetch ANGLE (minimal)
         run: |
-          mkdir angle
+          # Create a minimal .gclient that skips test dependencies
+          cat > .gclient << 'EOF'
+          solutions = [
+            {
+              "name": "angle",
+              "url": "https://chromium.googlesource.com/angle/angle.git",
+              "managed": False,
+              "custom_deps": {
+                # Skip heavy test dependencies
+                "third_party/VK-GL-CTS/src": None,
+                "third_party/llvm/src": None,
+              },
+              "custom_vars": {
+                "angle_skip_tests": True,
+              },
+            },
+          ]
+          EOF
+          
+          # Clone ANGLE with minimal history
+          git clone --depth 1 https://chromium.googlesource.com/angle/angle.git
           cd angle
-          fetch angle
-          cd angle
+          git fetch --depth 1 origin ${{ env.ANGLE_COMMIT }}
           git checkout ${{ env.ANGLE_COMMIT }}
           
-      - name: Bootstrap and sync
-        run: |
-          cd angle/angle
+          # Bootstrap and sync with minimal dependencies
           python scripts/bootstrap.py
-          gclient sync
+          gclient sync --no-history -D
           
       - name: Install build dependencies
         run: |
-          cd angle/angle
-          ./build/install-build-deps.sh
+          cd angle
+          if [ -f "build/install-build-deps.sh" ]; then
+            ./build/install-build-deps.sh
+          fi
           # Install cross-compilation tools for ARM64 if needed
           if [ "${{ matrix.arch }}" = "arm64" ] && [ "$(uname -m)" = "x86_64" ]; then
             sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
@@ -150,13 +120,14 @@ jobs:
           
       - name: Configure build
         run: |
-          cd angle/angle
+          cd angle
           
           # Build with all Linux-supported backends
           ARGS="is_debug=false is_component_build=false"
           ARGS="$ARGS angle_enable_gl=true"
           ARGS="$ARGS angle_enable_vulkan=true"
           ARGS="$ARGS angle_enable_null=true"
+          ARGS="$ARGS angle_build_tests=false"  # Skip test builds
           
           # Set architecture
           if [ "${{ matrix.arch }}" = "arm64" ]; then
@@ -172,23 +143,22 @@ jobs:
           
       - name: Build
         run: |
-          cd angle/angle
-          ninja -C out/Release
+          cd angle
+          ninja -C out/Release libEGL libGLESv2
           
       - name: Package
         run: |
-          cd angle/angle
-          mkdir -p ../../angle-linux-${{ matrix.arch }}-${{ env.BUILD_DATE }}
+          cd angle
+          mkdir -p ../angle-linux-${{ matrix.arch }}-${{ env.BUILD_DATE }}
           
           # Copy libraries
-          cp -v out/Release/libEGL.so* ../../angle-linux-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || true
-          cp -v out/Release/libGLESv2.so* ../../angle-linux-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || true
-          cp -v out/Release/libGLES*.so* ../../angle-linux-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || true
+          cp -v out/Release/libEGL.so* ../angle-linux-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || true
+          cp -v out/Release/libGLESv2.so* ../angle-linux-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || true
           
           # Copy headers
-          cp -r include ../../angle-linux-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
+          cp -r include ../angle-linux-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
           
-          cd ../..
+          cd ..
           zip -r angle-linux-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-linux-${{ matrix.arch }}-${{ env.BUILD_DATE }}
           
       - name: Upload Artifacts
@@ -224,29 +194,45 @@ jobs:
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "$PWD/depot_tools" >> $GITHUB_PATH
           
-      - name: Fetch ANGLE
+      # FIX: Use minimal fetch for macOS too
+      - name: Fetch ANGLE (minimal)
         run: |
-          mkdir angle
+          # Create a minimal .gclient
+          cat > .gclient << 'EOF'
+          solutions = [
+            {
+              "name": "angle",
+              "url": "https://chromium.googlesource.com/angle/angle.git",
+              "managed": False,
+              "custom_deps": {
+                "third_party/VK-GL-CTS/src": None,
+                "third_party/llvm/src": None,
+              },
+              "custom_vars": {
+                "angle_skip_tests": True,
+              },
+            },
+          ]
+          EOF
+          
+          git clone --depth 1 https://chromium.googlesource.com/angle/angle.git
           cd angle
-          fetch angle
-          cd angle
+          git fetch --depth 1 origin ${{ env.ANGLE_COMMIT }}
           git checkout ${{ env.ANGLE_COMMIT }}
           
-      - name: Bootstrap and sync
-        run: |
-          cd angle/angle
           python scripts/bootstrap.py
-          gclient sync
+          gclient sync --no-history -D
           
       - name: Configure build
         run: |
-          cd angle/angle
+          cd angle
           
           # Build with all macOS-supported backends
           ARGS="is_debug=false is_component_build=false"
           ARGS="$ARGS angle_enable_metal=true"
           ARGS="$ARGS angle_enable_gl=true"
           ARGS="$ARGS angle_enable_null=true"
+          ARGS="$ARGS angle_build_tests=false"
           
           # Set architecture
           if [ "${{ matrix.arch }}" = "arm64" ]; then
@@ -259,23 +245,22 @@ jobs:
           
       - name: Build
         run: |
-          cd angle/angle
-          ninja -C out/Release
+          cd angle
+          ninja -C out/Release libEGL libGLESv2
           
       - name: Package
         run: |
-          cd angle/angle
-          mkdir -p ../../angle-macos-${{ matrix.arch }}-${{ env.BUILD_DATE }}
+          cd angle
+          mkdir -p ../angle-macos-${{ matrix.arch }}-${{ env.BUILD_DATE }}
           
           # Copy libraries
-          cp -v out/Release/libEGL.dylib ../../angle-macos-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || true
-          cp -v out/Release/libGLESv2.dylib ../../angle-macos-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || true
-          cp -v out/Release/libGLES*.dylib ../../angle-macos-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || true
+          cp -v out/Release/libEGL.dylib ../angle-macos-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || true
+          cp -v out/Release/libGLESv2.dylib ../angle-macos-${{ matrix.arch }}-${{ env.BUILD_DATE }}/ || true
           
           # Copy headers
-          cp -r include ../../angle-macos-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
+          cp -r include ../angle-macos-${{ matrix.arch }}-${{ env.BUILD_DATE }}/
           
-          cd ../..
+          cd ..
           zip -r angle-macos-${{ matrix.arch }}-${{ env.BUILD_DATE }}.zip angle-macos-${{ matrix.arch }}-${{ env.BUILD_DATE }}
           
       - name: Upload Artifacts
@@ -289,7 +274,7 @@ jobs:
   release:
     runs-on: ubuntu-24.04
     needs: [info, build-windows, build-linux, build-macos]
-    if: always() && needs.info.result == 'success'
+    if: always() && needs.info.result == 'success' && needs.build-windows.result == 'success'
     permissions:
       contents: write
     env:
