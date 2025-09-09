@@ -61,8 +61,8 @@ if exist build (
 call git fetch origin %ANGLE_COMMIT% || exit /b 1
 call git checkout --force FETCH_HEAD || exit /b 1
 python.exe scripts\bootstrap.py || exit /b 1
-rem Modified DEPS filtering - keep VK-GL-CTS for Vulkan support
-"C:\Program Files\Git\usr\bin\sed.exe" -i.bak -e "/'third_party\/catapult'\: /,+3d" -e "/'third_party\/dawn'\: /,+3d" -e "/'third_party\/llvm\/src'\: /,+3d" -e "/'third_party\/SwiftShader'\: /,+3d" -e "s/'tools\/rust\/update_rust.py'/'-c',''/" DEPS || exit /b 1
+rem Modified DEPS filtering - keep SwiftShader and VK-GL-CTS for Vulkan support
+"C:\Program Files\Git\usr\bin\sed.exe" -i.bak -e "/'third_party\/catapult'\: /,+3d" -e "/'third_party\/dawn'\: /,+3d" -e "/'third_party\/llvm\/src'\: /,+3d" -e "s/'tools\/rust\/update_rust.py'/'-c',''/" DEPS || exit /b 1
 call gclient sync -f -D -R || exit /b 1
 popd
 rem
@@ -85,6 +85,8 @@ copy /y angle\out\%ARCH%\libEGL.dll         angle-%ARCH%\bin 1>nul 2>nul
 copy /y angle\out\%ARCH%\libGLESv1_CM.dll   angle-%ARCH%\bin 1>nul 2>nul
 copy /y angle\out\%ARCH%\libGLESv2.dll      angle-%ARCH%\bin 1>nul 2>nul
 rem Copy Vulkan-related files if they exist
+copy /y angle\out\%ARCH%\vk_swiftshader.dll angle-%ARCH%\bin 1>nul 2>nul
+copy /y angle\out\%ARCH%\vk_swiftshader_icd.json angle-%ARCH%\bin 1>nul 2>nul
 copy /y angle\out\%ARCH%\vulkan-1.dll       angle-%ARCH%\bin 1>nul 2>nul
 copy /y angle\out\%ARCH%\libEGL.dll.lib       angle-%ARCH%\lib 1>nul 2>nul
 copy /y angle\out\%ARCH%\libGLESv1_CM.dll.lib angle-%ARCH%\lib 1>nul 2>nul
