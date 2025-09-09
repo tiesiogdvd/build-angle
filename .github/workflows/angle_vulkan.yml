@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:  # Allow manual triggering
 jobs:
   info:
     runs-on: ubuntu-24.04
@@ -27,7 +28,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      # Ensure Vulkan SDK is available (Windows 2022 runners should have it)
+      
+      - name: Install Vulkan SDK
+        run: |
+          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe" -OutFile vulkan-sdk.exe
+          Start-Process -FilePath vulkan-sdk.exe -ArgumentList '/S' -Wait
+          echo "VULKAN_SDK=C:\VulkanSDK\1.3.290.0" >> $env:GITHUB_ENV
+        shell: powershell
+      
       - name: Verify Vulkan SDK
         shell: cmd
         run: |
@@ -37,10 +45,12 @@ jobs:
           ) else (
             echo Warning: VULKAN_SDK environment variable not set
           )
+          
       - name: Run Build Script
         id: build
         shell: cmd
         run: call build.cmd ${{ matrix.arch }}
+        
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
